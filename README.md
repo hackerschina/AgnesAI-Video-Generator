@@ -74,7 +74,7 @@ python main.py
 
 ### 使用打包版本
 
-从 [Releases](https://github.com/your-username/AgnesAI-Video-Generator/releases) 下载最新的 exe 版本，双击即可运行。
+从 [Releases](https://github.com/hackerschina/AgnesAI-Video-Generator/releases) 下载最新的 exe 版本，双击即可运行。
 
 ---
 
