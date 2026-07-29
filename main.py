@@ -1050,6 +1050,8 @@ class AgnesVideoApp(QMainWindow):
         self.scene_list = QListWidget()
         self.scene_list.setMinimumHeight(150)
         self.scene_list.itemDoubleClicked.connect(self._on_scene_double_clicked)
+        self.scene_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.scene_list.customContextMenuRequested.connect(self._scene_context_menu)
         script_layout.addWidget(self.scene_list)
 
         layout.addWidget(script_group)
@@ -1548,16 +1550,121 @@ class AgnesVideoApp(QMainWindow):
         self.scene_list.clear()
         if self.current_project:
             for scene in self.current_project.get('scenes', []):
-                status_icon = "⏳" if scene['status'] == 'pending' else "✅" if scene['status'] == 'completed' else "❌"
-                item = QListWidgetItem(f"{status_icon} 场景{scene.get('scene_number', '')}: {scene.get('prompt', '')[:50]}...")
+                has_video = bool(scene.get('video_url'))
+                if scene['status'] == 'completed' and has_video:
+                    status_icon = "🎬"
+                elif scene['status'] == 'completed':
+                    status_icon = "✅"
+                elif scene['status'] == 'failed':
+                    status_icon = "❌"
+                else:
+                    status_icon = "⏳"
+                video_tag = " [有视频]" if has_video else ""
+                prompt_text = scene.get('prompt', '')[:50]
+                item = QListWidgetItem(f"{status_icon} 场景{scene.get('scene_number', '')}: {prompt_text}...{video_tag}")
                 item.setData(Qt.UserRole, scene['id'])
-                item.setToolTip(scene.get('prompt', ''))
+                tooltip = scene.get('prompt', '')
+                if has_video:
+                    tooltip += f"\n视频URL: {scene['video_url']}"
+                    tooltip += "\n\n双击打开视频，右键查看更多操作"
+                else:
+                    tooltip += "\n\n双击生成视频"
+                item.setToolTip(tooltip)
                 self.scene_list.addItem(item)
 
     def _on_scene_double_clicked(self, item):
         scene_id = item.data(Qt.UserRole)
         if scene_id:
+            scene = None
+            for s in self.current_project.get('scenes', []):
+                if s['id'] == scene_id:
+                    scene = s
+                    break
+            if scene and scene.get('video_url'):
+                QDesktopServices.openUrl(QUrl(scene['video_url']))
+                self.comic_status_label.setText(f"🎬 正在打开场景 {scene.get('scene_number', '')} 的视频...")
+            else:
+                self._generate_single_scene(scene_id)
+
+    def _scene_context_menu(self, pos):
+        item = self.scene_list.itemAt(pos)
+        if not item or not self.current_project:
+            return
+        scene_id = item.data(Qt.UserRole)
+        scene = None
+        for s in self.current_project.get('scenes', []):
+            if s['id'] == scene_id:
+                scene = s
+                break
+        if not scene:
+            return
+
+        menu = QMenu(self)
+
+        has_video = bool(scene.get('video_url'))
+
+        open_action = menu.addAction("🔗 打开视频")
+        open_action.setEnabled(has_video)
+        download_action = menu.addAction("💾 下载视频")
+        download_action.setEnabled(has_video)
+        copy_action = menu.addAction("📋 复制视频链接")
+        copy_action.setEnabled(has_video)
+        menu.addSeparator()
+        regen_action = menu.addAction("🎬 重新生成视频")
+        menu.addSeparator()
+        delete_action = menu.addAction("🗑️ 删除场景")
+
+        action = menu.exec_(self.scene_list.mapToGlobal(pos))
+
+        if action == open_action and has_video:
+            QDesktopServices.openUrl(QUrl(scene['video_url']))
+        elif action == download_action and has_video:
+            self._download_scene_video(scene)
+        elif action == copy_action and has_video:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(scene['video_url'])
+            self.comic_status_label.setText("✅ 视频链接已复制")
+        elif action == regen_action:
             self._generate_single_scene(scene_id)
+        elif action == delete_action:
+            reply = QMessageBox.question(
+                self, "确认删除",
+                f"确定要删除场景 {scene.get('scene_number', '')} 吗？此操作不可撤销。",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                project = self.current_project
+                project['scenes'] = [s for s in project['scenes'] if s['id'] != scene_id]
+                self.project_manager.save_project(project)
+                self._refresh_scene_list()
+                self.comic_status_label.setText("✅ 场景已删除")
+
+    def _download_scene_video(self, scene):
+        url = scene.get('video_url', '')
+        if not url:
+            return
+        save_dir = os.path.join(_get_data_dir(), "videos")
+        os.makedirs(save_dir, exist_ok=True)
+        scene_num = scene.get('scene_number', '?')
+        filename = f"scene_{scene_num}_{int(time.time())}.mp4"
+        default_path = os.path.join(save_dir, filename)
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存视频", default_path, "MP4 视频 (*.mp4);;所有文件 (*)"
+        )
+        if not file_path:
+            return
+        self.comic_status_label.setText(f"⏳ 正在下载场景 {scene_num} 的视频...")
+        self.download_worker = DownloadWorker(url, file_path)
+        self.download_worker.progress_update.connect(
+            lambda v: self.comic_status_label.setText(f"⏳ 场景 {scene_num} 下载进度: {v}%")
+        )
+        self.download_worker.finished_download.connect(
+            lambda p: self.comic_status_label.setText(f"✅ 场景 {scene_num} 下载完成: {p}")
+        )
+        self.download_worker.download_error.connect(
+            lambda e: self.comic_status_label.setText(f"❌ {e}")
+        )
+        self.download_worker.start()
 
     def _generate_single_scene(self, scene_id):
         if not self.current_project:
@@ -1599,8 +1706,7 @@ class AgnesVideoApp(QMainWindow):
             {"status": "completed", "video_url": url}
         )
         self._refresh_scene_list()
-        self.comic_status_label.setText(f"✅ 场景视频已生成！")
-        QDesktopServices.openUrl(QUrl(url))
+        self.comic_status_label.setText(f"✅ 场景视频已生成！双击场景可打开视频")
 
     def _generate_all_scenes(self):
         if not self.current_project:
